@@ -55,6 +55,30 @@ static void bfs_small(int n, const uint16_t *tab, uint8_t *dist)
     }
 }
 
+static uint8_t pos0[PERMUTATIONS], pos1[PERMUTATIONS];   /* 1號、2號角塊在哪個位置 */
+static uint8_t twist_at[ORIENTATIONS][CUBIES];          /* 每個位置的扭轉量 */
+
+static void build_index_tables(void)
+{
+    state_t s;
+    for (uint32_t p = 0; p < PERMUTATIONS; ++p) {
+        unrank_state(p * ORIENTATIONS, &s);
+        for (uint8_t i = 0; i < CUBIES; ++i) {
+            if (s.p[i] == 0) pos0[p] = i;
+            if (s.p[i] == 1) pos1[p] = i;
+        }
+    }
+    for (uint32_t o = 0; o < ORIENTATIONS; ++o) {
+        unrank_state(o, &s);
+        for (uint8_t i = 0; i < CUBIES; ++i) twist_at[o][i] = s.o[i];
+    }
+}
+
+static uint32_t pdb2_fast(uint16_t p, uint16_t o)
+{
+    return (uint32_t) p * 9 + twist_at[o][pos0[p]] * 3 + twist_at[o][pos1[p]];
+}
+
 static unsigned long long nodes;   /* 這次搜尋總共檢查了幾個節點 */
 
 /* 牌子:兩張表取最大值 */
@@ -69,29 +93,34 @@ static uint8_t h(uint16_t p, uint16_t o)
 
 static uint8_t h(uint16_t p, uint16_t o)
 {
-    uint8_t a = use_pdb2 ? pdb2[pdb2_index((uint32_t) p * ORIENTATIONS + o)]
+    uint8_t a = use_pdb2 ? pdb2[pdb2_fast(p, o)]
                          : perm_dist[p];
     uint8_t b = orient_dist[o];
     return a > b ? a : b;
 }
 
+static uint8_t path[16];
 /* 深度限制 DFS:回傳 1 = 找到 */
+
 static int dfs(uint16_t p, uint16_t o, int g, int bound, int last_face)
 {
     nodes++;
-    if (g + h(p, o) > bound) return 0;            /* ★ 剪枝:g + h > 上限就放棄 */
+    if (g + h(p, o) > bound) return 0;            /* 剪枝:g + h > 上限就放棄 */
     if (p == 0 && o == 0) return 1;               /* 已還原,找到了 */
     for (int face = 0; face < 3; ++face) {
-        if (face == last_face) continue;          /* ★ 同一面不連轉 */
+        if (face == last_face) continue;          /* 同一面不連轉 */
         uint16_t np = p, no = o;
         for (int turn = 0; turn < 3; ++turn) {    /* 90°、180°、270° */
             np = permutation[face][np];
             no = orientation[face][no];
+            path[g] = (uint8_t) (face * 3 + turn);          /* 記下第 g 步 */
             if (dfs(np, no, g + 1, bound, face)) return 1;
         }
     }
     return 0;
 }
+
+
 
 /* IDA*:上限從 h(起點) 開始,一輪一輪加 1 */
 static int ida(uint32_t rank)
@@ -461,6 +490,7 @@ int main(int argc, char **argv)
         uint8_t *table = build_table(&diameter);
         bfs_small(PERMUTATIONS, &permutation[0][0], perm_dist);
         bfs_small(ORIENTATIONS, &orientation[0][0], orient_dist);
+        build_index_tables();
         if (strcmp(argv[1], "--ida2") == 0) {
             build_pdb2(table);
             use_pdb2 = 1;
@@ -481,6 +511,52 @@ int main(int argc, char **argv)
         printf("distance-11 states: %d, wrong length: %d\n", count, bad);
         printf("nodes: max %llu (rank %u), avg %.0f\n", worst, (unsigned) worst_rank, (double) total / count);
         printf("21345671111111: %d moves, %llu nodes\n", len, nodes);
+        free(table);
+        return 0;
+    }
+        if (argc == 2 && strcmp(argv[1], "--gates") == 0) {
+        uint8_t diameter;
+        uint8_t *table = build_table(&diameter);
+        bfs_small(PERMUTATIONS, &permutation[0][0], perm_dist);
+        bfs_small(ORIENTATIONS, &orientation[0][0], orient_dist);
+        build_index_tables();
+        build_pdb2(table);
+        use_pdb2 = 1;
+
+        /* 標準答案:每個狀態的真實步數 */
+        uint8_t *dist = malloc(STATES);
+        for (uint32_t r = 0; r < STATES; ++r) dist[r] = (uint8_t) oracle_dist(table, r);
+
+        /* H2:三張表都填滿,印最大值,已還原那格是 0 */
+        int ok2 = 1;
+        uint8_t mp = 0, mo = 0, m2 = 0;
+        for (int i = 0; i < PERMUTATIONS; ++i) { if (perm_dist[i] == 0xFF) ok2 = 0; if (perm_dist[i] > mp) mp = perm_dist[i]; }
+        for (int i = 0; i < ORIENTATIONS; ++i) { if (orient_dist[i] == 0xFF) ok2 = 0; if (orient_dist[i] > mo) mo = orient_dist[i]; }
+        for (int i = 0; i < PERMUTATIONS * 9; ++i) { if (pdb2[i] == 0xFF) ok2 = 0; if (pdb2[i] > m2) m2 = pdb2[i]; }
+        if (perm_dist[0] != 0 || orient_dist[0] != 0 || pdb2[0] != 0) ok2 = 0;
+        printf("H2 %s: max perm %u, orient %u, pdb2 %u; solved entries are 0\n",
+               ok2 ? "PASS" : "FAIL", mp, mo, m2);
+
+        /* H1:每個狀態都 h <= d */
+        uint32_t bad1 = 0;
+        for (uint32_t r = 0; r < STATES; ++r)
+            if (h((uint16_t) (r / ORIENTATIONS), (uint16_t) (r % ORIENTATIONS)) > dist[r]) bad1++;
+        printf("H1 %s: %u states with h > d\n", bad1 ? "FAIL" : "PASS", (unsigned) bad1);
+        fflush(stdout);
+
+        /* H3:每個狀態都解,步數要等於 d,而且照著轉一遍要回到已還原 */
+        uint32_t bad3 = 0;
+        for (uint32_t r = 0; r < STATES; ++r) {
+            int len = ida(r);
+            uint16_t p = (uint16_t) (r / ORIENTATIONS), o = (uint16_t) (r % ORIENTATIONS);
+            for (int k = 0; k < len; ++k) {
+                int f = path[k] / 3;
+                for (int t = 0; t <= path[k] % 3; ++t) { p = permutation[f][p]; o = orientation[f][o]; }
+            }
+            if (len != dist[r] || p != 0 || o != 0) bad3++;
+        }
+        printf("H3 %s: %u states wrong\n", bad3 ? "FAIL" : "PASS", (unsigned) bad3);
+        free(dist);
         free(table);
         return 0;
     }
