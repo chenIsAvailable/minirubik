@@ -182,15 +182,73 @@ srch_ret:
     addi sp, sp, 16         # give the 16 bytes back
     ret
 dfs:
-    # fast path: no stack, no s registers, no calls; args stay in a0-a4
-    # 2a: nodes++
+    # iterative IDA* depth-first search for one bound (no recursion)
+    # in:  a0 = p0, a1 = o0, a3 = bound (a2, a4 are ignored)
+    # out: a0 = 1 if solved within bound, 0 otherwise
+    # each level keeps its loop state in one 32-byte slot of dfs_stack:
+    #   0: p   4: o   8: last   12: f   16: t   20: np   24: no
+    # registers: s0 = p, s1 = o, s2 = d, s3 = bound, s4 = last,
+    #            s5 = f, s6 = t, s7 = np, s8 = no, s9 = &dfs_stack[d]
+
+    # prologue: runs once per bound, reserve 48 bytes, save ra and s0-s9
+    addi sp, sp, -48        # reserve 48 bytes on the stack
+    sw   ra, 44(sp)         # save return address
+    sw   s0, 40(sp)         # save s0
+    sw   s1, 36(sp)         # save s1
+    sw   s2, 32(sp)         # save s2
+    sw   s3, 28(sp)         # save s3
+    sw   s4, 24(sp)         # save s4
+    sw   s5, 20(sp)         # save s5
+    sw   s6, 16(sp)         # save s6
+    sw   s7, 12(sp)         # save s7
+    sw   s8, 8(sp)          # save s8
+    sw   s9, 4(sp)          # save s9
+
+    # root: nodes++ (no prune needed: bound >= h(p0, o0) always)
+    la   t0, nodes          # t0 = &nodes
+    lw   t1, 0(t0)          # t1 = nodes
+    addi t1, t1, 1          # t1 = nodes + 1
+    sw   t1, 0(t0)          # nodes = nodes + 1
+    or   t0, a0, a1         # t0 == 0 only if p0 == 0 and o0 == 0
+    beqz t0, dfs_found      # already solved: return 1
+
+    # init
+    mv   s0, a0             # s0 = p = p0
+    mv   s1, a1             # s1 = o = o0
+    li   s2, 0              # s2 = d = 0
+    mv   s3, a3             # s3 = bound
+    li   s4, 3              # s4 = last = 3 (no previous face)
+    la   s9, dfs_stack      # s9 = &dfs_stack[0]
+
+dfs_level:
+    # a new level starts: f = 0
+    li   s5, 0              # f = 0
+dfs_f_loop:
+    li   t0, 3
+    bgeu s5, t0, dfs_back   # if f >= 3, this level is finished: backtrack
+    beq  s5, s4, dfs_f_next # if f == last, skip this face
+    mv   s7, s0             # np = p (restart from this level's state)
+    mv   s8, s1             # no = o
+    li   s6, 0              # t = 0
+dfs_t_loop:
+    li   t0, 3
+    bgeu s6, t0, dfs_f_next # if t >= 3, go to next face
+
+    # turn face f once more: (np, no) = move(np, no, f)
+    mv   a0, s7             # a0 = np
+    mv   a1, s8             # a1 = no
+    mv   a2, s5             # a2 = f
+    call move               # (a0, a1) = child state
+    mv   s7, a0             # np = new p
+    mv   s8, a1             # no = new o
+
+    # nodes++ (every generated child counts, same as one dfs call before)
     la   t0, nodes          # t0 = &nodes
     lw   t1, 0(t0)          # t1 = nodes
     addi t1, t1, 1          # t1 = nodes + 1
     sw   t1, 0(t0)          # nodes = nodes + 1
 
-    # 2b: inlined h(p, o), then prune if g + h > bound
-    # reads only a0 (p), a1 (o), a2 (g), a3 (bound); temps t0-t6 only
+    # inlined h(np, no): reads a0 (np), a1 (no); result in t5
     slli t0, a1, 3          # t0 = row = o*8
     la   t2, twist_at8      # t2 = base of twist_at8
     add  t2, t2, t0         # t2 = &twist_at8[row]
@@ -225,74 +283,39 @@ dfs:
     bgeu t5, t6, dfs_h_max  # if a >= b, t5 already holds max
     mv   t5, t6             # otherwise max = b
 dfs_h_max:
-    add  t0, a2, t5         # t0 = g + h
-    bltu a3, t0, dfs_fast_no    # pruned: return 0 without touching the stack
+    # prune if (d + 1) + h > bound
+    add  t0, s2, t5         # t0 = d + h
+    addi t0, t0, 1          # t0 = (d + 1) + h
+    bltu s3, t0, dfs_t_next # pruned: do not descend, try next t
 
-    # 2c: solved? (s0, s1 are not set yet, so read a0, a1)
-    or   t0, a0, a1         # t0 == 0 only if p == 0 and o == 0
-    beqz t0, dfs_fast_yes   # solved: return 1 without touching the stack
-
-    # slow path: this node is expanded, so build the stack frame now
-    # prologue: reserve 48 bytes, save ra and s0-s8
-    addi sp, sp, -48        # reserve 48 bytes on the stack
-    sw   ra, 44(sp)         # save return address
-    sw   s0, 40(sp)         # save s0
-    sw   s1, 36(sp)         # save s1
-    sw   s2, 32(sp)         # save s2
-    sw   s3, 28(sp)         # save s3
-    sw   s4, 24(sp)         # save s4
-    sw   s5, 20(sp)         # save s5
-    sw   s6, 16(sp)         # save s6
-    sw   s7, 12(sp)         # save s7
-    sw   s8, 8(sp)          # save s8
-
-    # move arguments into saved registers
-    mv   s0, a0             # s0 = p
-    mv   s1, a1             # s1 = o
-    mv   s2, a2             # s2 = g
-    mv   s3, a3             # s3 = bound
-    mv   s4, a4             # s4 = last
-
-    # 3a: outer loop over faces f = 0..2, skip f == last
-    li   s5, 0              # f = 0
-dfs_f_loop:
-    li   t0, 3
-    bgeu s5, t0, dfs_no     # if f >= 3, all faces tried: return 0
-    beq  s5, s4, dfs_f_next # if f == last, skip this face (continue)
-    mv   s7, s0             # np = p (restart from original state)
-    mv   s8, s1             # no = o
-
-    # inner loop over turns t = 0..2 (turn 1/2/3 times)
-    li   s6, 0              # t = 0
-dfs_t_loop:
-    li   t0, 3
-    bgeu s6, t0, dfs_f_next # if t >= 3, go to next face
-
-    # 3b: turn face f once more: (np, no) = move(np, no, f)
-    mv   a0, s7             # a0 = np
-    mv   a1, s8             # a1 = no
-    mv   a2, s5             # a2 = f
-    call move               # (a0, a1) = new state
-    mv   s7, a0             # np = new p
-    mv   s8, a1             # no = new o
-
-    # 3c: record step g: move_face[g] = f, move_turn[g] = t
+    # record step d: move_face[d] = f, move_turn[d] = t
     la   t0, move_face      # t0 = base of move_face
-    add  t0, t0, s2         # t0 = &move_face[g]
-    sb   s5, 0(t0)          # move_face[g] = f
+    add  t0, t0, s2         # t0 = &move_face[d]
+    sb   s5, 0(t0)          # move_face[d] = f
     la   t0, move_turn      # t0 = base of move_turn
-    add  t0, t0, s2         # t0 = &move_turn[g]
-    sb   s6, 0(t0)          # move_turn[g] = t
+    add  t0, t0, s2         # t0 = &move_turn[d]
+    sb   s6, 0(t0)          # move_turn[d] = t
 
-    # 3d: recurse: if (dfs(np, no, g + 1, bound, f)) return 1
-    mv   a0, s7             # a0 = np
-    mv   a1, s8             # a1 = no
-    addi a2, s2, 1          # a2 = g + 1 (s2 itself stays g)
-    mv   a3, s3             # a3 = bound
-    mv   a4, s5             # a4 = f (becomes next level's last)
-    call dfs                # a0 = 1 if a solution was found below
-    bnez a0, dfs_yes        # found: return 1 all the way up
+    # child solved?
+    or   t0, s7, s8         # t0 == 0 only if np == 0 and no == 0
+    beqz t0, dfs_found      # solved: done
 
+    # descend: save this level into dfs_stack[d], then go one level down
+    sw   s0, 0(s9)          # slot.p    = p
+    sw   s1, 4(s9)          # slot.o    = o
+    sw   s4, 8(s9)          # slot.last = last
+    sw   s5, 12(s9)         # slot.f    = f
+    sw   s6, 16(s9)         # slot.t    = t
+    sw   s7, 20(s9)         # slot.np   = np
+    sw   s8, 24(s9)         # slot.no   = no
+    addi s9, s9, 32         # s9 = &dfs_stack[d + 1]
+    addi s2, s2, 1          # d = d + 1
+    mv   s0, s7             # p = np (the child becomes this level's node)
+    mv   s1, s8             # o = no
+    mv   s4, s5             # last = f
+    j    dfs_level          # start the new level
+
+dfs_t_next:
     addi s6, s6, 1          # t++
     j    dfs_t_loop         # back to the turn check
 
@@ -300,13 +323,28 @@ dfs_f_next:
     addi s5, s5, 1          # f++
     j    dfs_f_loop         # back to the face check
 
-dfs_yes:
+dfs_back:
+    # backtrack: this level is finished, return to the parent level
+    beqz s2, dfs_notfound   # d == 0: the root is finished, not found
+    addi s9, s9, -32        # s9 = &dfs_stack[d - 1]
+    addi s2, s2, -1         # d = d - 1
+    lw   s0, 0(s9)          # p    = slot.p
+    lw   s1, 4(s9)          # o    = slot.o
+    lw   s4, 8(s9)          # last = slot.last
+    lw   s5, 12(s9)         # f    = slot.f
+    lw   s6, 16(s9)         # t    = slot.t
+    lw   s7, 20(s9)         # np   = slot.np
+    lw   s8, 24(s9)         # no   = slot.no
+    j    dfs_t_next         # continue with the next t at that level
+
+dfs_found:
     li   a0, 1              # return 1: solution found
     j    dfs_ret
-dfs_no:
-    li   a0, 0              # return 0: no solution (fall through)
+dfs_notfound:
+    li   a0, 0              # return 0: no solution within bound
 dfs_ret:
-    # epilogue: restore ra, s0-s8, free 48 bytes, return
+    # epilogue: restore ra, s0-s9, free 48 bytes, return
+    lw   s9, 4(sp)          # restore s9
     lw   s8, 8(sp)          # restore s8
     lw   s7, 12(sp)         # restore s7
     lw   s6, 16(sp)         # restore s6
@@ -320,14 +358,17 @@ dfs_ret:
     addi sp, sp, 48         # give the 48 bytes back
     ret
 
-    # fast exits: no prologue was run, so they must not run the epilogue
-dfs_fast_yes:
-    li   a0, 1              # return 1: solved
-    ret
-dfs_fast_no:
-    li   a0, 0              # return 0: pruned
-    ret
-
+# fixed-size level stack: 12 slots x 32 bytes = 384 bytes
+# the deepest saved slot is d = 9 (bound <= 11 and a descended child has h >= 1)
+.data
+dfs_stack:
+    .word 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    .word 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    .word 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    .word 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    .word 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    .word 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+.text
 verify:
     # prologue: reserve 32 bytes, save ra and s0-s3
     addi sp, sp, -32        # reserve 32 bytes on the stack
@@ -453,9 +494,6 @@ h:
     mv   a0, t6             # otherwise b is larger
 h_done:
     ret                     # return to caller with a0
-# Input state, inlined at build time.
-.data
-state: .string "21345671111111"
 # Generated by stage3/gen_tables.c --emit-asm. Do not edit.
 .data
 # 16-bit tables first, so every .half is 2-byte aligned.
@@ -5430,3 +5468,6 @@ twist_at8:
     .byte 2, 2, 2, 2, 1, 1, 2, 0, 2, 2, 2, 2, 1, 2, 1, 0
     .byte 2, 2, 2, 2, 2, 0, 2, 0, 2, 2, 2, 2, 2, 1, 1, 0
     .byte 2, 2, 2, 2, 2, 2, 0, 0
+# Input state, inlined at build time.
+.data
+state: .string "12345672311111"
