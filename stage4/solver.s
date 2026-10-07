@@ -5470,4 +5470,4 @@ twist_at8:
     .byte 2, 2, 2, 2, 2, 2, 0, 0
 # Input state, inlined at build time.
 .data
-state: .string "12345672311111"
+state: .string "21345671111111"

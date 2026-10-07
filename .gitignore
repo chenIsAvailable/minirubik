@@ -1,3 +1,5 @@
 *.exe
 *.elf
 stage4/build_*.s
+*.o
+files.txt
