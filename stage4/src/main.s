@@ -27,6 +27,8 @@ main:
     mv   a2, s2             # a2 = len
     call verify             # a0 = 1 if solved
     mv   s3, a0             # s3 = verify result
+    mv   a0, s2             # a0 = solution length
+    call render             # GUI build: animate on the LED matrix; CLI build: returns at once
     j    main_exit
 
 main_bad:
