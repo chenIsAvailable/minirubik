@@ -1,5 +1,3 @@
-.frama-c/
-.frama-c-mcp/
-*.swp
-solver
-mini
+*.exe
+*.elf
+stage4/build_*.s
