@@ -17,6 +17,8 @@ main:
     # search for the shortest solution
     call search             # a0 = len, or -1 if not found (a0, a1 = p, o already)
     mv   s2, a0             # s2 = len
+    la   t0, nodes
+    lw   s4, 0(t0)          # s4 = total dfs calls, for checking
     bltz s2, main_bad       # len < 0 (signed): not found
 
     # replay the solution and check it reaches (0, 0)

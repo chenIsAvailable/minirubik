@@ -1,4 +1,55 @@
 dfs:
+    # fast path: no stack, no s registers, no calls; args stay in a0-a4
+    # 2a: nodes++
+    la   t0, nodes          # t0 = &nodes
+    lw   t1, 0(t0)          # t1 = nodes
+    addi t1, t1, 1          # t1 = nodes + 1
+    sw   t1, 0(t0)          # nodes = nodes + 1
+
+    # 2b: inlined h(p, o), then prune if g + h > bound
+    # reads only a0 (p), a1 (o), a2 (g), a3 (bound); temps t0-t6 only
+    slli t0, a1, 3          # t0 = row = o*8
+    la   t2, twist_at8      # t2 = base of twist_at8
+    add  t2, t2, t0         # t2 = &twist_at8[row]
+
+    la   t1, pos0           # t1 = base of pos0
+    add  t1, t1, a0         # t1 = &pos0[p]
+    lbu  t1, 0(t1)          # t1 = pos0[p]
+    add  t1, t2, t1         # t1 = &twist_at8[row + pos0[p]]
+    lbu  t3, 0(t1)          # t3 = tw0
+
+    la   t1, pos1           # t1 = base of pos1
+    add  t1, t1, a0         # t1 = &pos1[p]
+    lbu  t1, 0(t1)          # t1 = pos1[p]
+    add  t1, t2, t1         # t1 = &twist_at8[row + pos1[p]]
+    lbu  t4, 0(t1)          # t4 = tw1
+
+    slli t0, a0, 3          # t0 = p*8
+    add  t0, t0, a0         # t0 = p*9
+    slli t1, t3, 1          # t1 = tw0*2
+    add  t1, t1, t3         # t1 = tw0*3
+    add  t0, t0, t1         # t0 = p*9 + tw0*3
+    add  t0, t0, t4         # t0 = k
+
+    la   t2, pdb2           # t2 = base of pdb2
+    add  t2, t2, t0         # t2 = &pdb2[k]
+    lbu  t5, 0(t2)          # t5 = a = pdb2[k]
+
+    la   t2, orient_dist    # t2 = base of orient_dist
+    add  t2, t2, a1         # t2 = &orient_dist[o]
+    lbu  t6, 0(t2)          # t6 = b = orient_dist[o]
+
+    bgeu t5, t6, dfs_h_max  # if a >= b, t5 already holds max
+    mv   t5, t6             # otherwise max = b
+dfs_h_max:
+    add  t0, a2, t5         # t0 = g + h
+    bltu a3, t0, dfs_fast_no    # pruned: return 0 without touching the stack
+
+    # 2c: solved? (s0, s1 are not set yet, so read a0, a1)
+    or   t0, a0, a1         # t0 == 0 only if p == 0 and o == 0
+    beqz t0, dfs_fast_yes   # solved: return 1 without touching the stack
+
+    # slow path: this node is expanded, so build the stack frame now
     # prologue: reserve 48 bytes, save ra and s0-s8
     addi sp, sp, -48        # reserve 48 bytes on the stack
     sw   ra, 44(sp)         # save return address
@@ -18,23 +69,6 @@ dfs:
     mv   s2, a2             # s2 = g
     mv   s3, a3             # s3 = bound
     mv   s4, a4             # s4 = last
-
-    # 2a: nodes++
-    la   t0, nodes          # t0 = &nodes
-    lw   t1, 0(t0)          # t1 = nodes
-    addi t1, t1, 1          # t1 = nodes + 1
-    sw   t1, 0(t0)          # nodes = nodes + 1
-
-    # 2b: prune if g + h(p, o) > bound
-    mv   a0, s0             # a0 = p
-    mv   a1, s1             # a1 = o
-    call h                  # a0 = h(p, o)
-    add  t0, s2, a0         # t0 = g + h
-    bltu s3, t0, dfs_no     # if bound < g + h, return 0
-
-    # 2c: solved?
-    or   t0, s0, s1         # t0 == 0 only if p == 0 and o == 0
-    beqz t0, dfs_yes        # if solved, return 1
 
     # 3a: outer loop over faces f = 0..2, skip f == last
     li   s5, 0              # f = 0
@@ -101,5 +135,13 @@ dfs_ret:
     lw   s0, 40(sp)         # restore s0
     lw   ra, 44(sp)         # restore return address
     addi sp, sp, 48         # give the 48 bytes back
+    ret
+
+    # fast exits: no prologue was run, so they must not run the epilogue
+dfs_fast_yes:
+    li   a0, 1              # return 1: solved
+    ret
+dfs_fast_no:
+    li   a0, 0              # return 0: pruned
     ret
 
